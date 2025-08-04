@@ -1,5 +1,6 @@
 import os
 import json
+import argparse
 from typing import Dict
 from dataclasses import dataclass
 
@@ -7,6 +8,8 @@ import torch
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTTrainer, SFTConfig
+from dotenv import load_dotenv
+from torch.utils.data import random_split
 
 from dataset import SFTDataCollator, SFTDataset
 from utils.constants import model2template
@@ -34,27 +37,29 @@ class LoraTrainingArguments:
     early_stopping_patience: int = 3
     early_stopping_threshold: float = 0.001
     learning_rate: float = 2e-4
-    warmup_steps: float = 0.1
+    warmup_steps_ratio: float = 0.1
     bf16: bool = True
     optim: str = "adam_torch"
 
 
-def train_lora(model_id: str, context_length: int, training_args: Dict, data_file_name: str):
+def train_lora(model_id: str, context_length: int, data: str, augmented_data: str,
+               validation_ratio: float, training_args: Dict):
+
     # Define training arguments
-    per_device_train_batch_size = training_args.per_device_train_batch_size
-    gradient_accumulation_steps = training_args.gradient_accumulation_steps
-    num_train_epochs = training_args.num_train_epochs
-    lora_rank = training_args.lora_rank
-    lora_alpha = training_args.lora_alpha
-    lora_dropout = training_args.lora_dropout
-    target_modules = training_args.target_modules
-    early_stopping_patience = training_args.early_stopping_patience
-    early_stopping_threshold = training_args.early_stopping_threshold
-    learning_rate = training_args.learning_rate
-    warmup_steps = training_args.warmup_steps
-    bf16 = training_args.bf16
-    optim = training_args.optim
-    
+    per_device_train_batch_size = training_args.get("per_device_train_batch_size", 1)
+    gradient_accumulation_steps = training_args.get("gradient_accumulation_steps", 8)
+    num_train_epochs = training_args.get("num_train_epochs", 1)
+    lora_rank = training_args.get("lora_rank", 8)
+    lora_alpha = training_args.get("lora_alpha", 16)
+    lora_dropout = training_args.get("lora_dropout", 0.1)
+    target_modules = training_args.get("target_modules", ["q_proj", "v_proj"])
+    early_stopping_patience = training_args.get("early_stopping_patience", 3)
+    early_stopping_threshold = training_args.get("early_stopping_threshold", 0.001)
+    learning_rate = training_args.get("learning_rate", 2e-4)
+    warmup_steps_ratio = training_args.get("warmup_steps_ratio", 0.1)
+    bf16 = training_args.get("bf16", True)
+    optim = training_args.get("optim", "adam_torch")
+
     assert model_id in model2template, f"model_id {model_id} not supported"
 
     # Define LoRA configuration
@@ -73,21 +78,6 @@ def train_lora(model_id: str, context_length: int, training_args: Dict, data_fil
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
-    training_args = SFTConfig(
-        per_device_train_batch_size=per_device_train_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        warmup_steps=100,
-        learning_rate=learning_rate,
-        bf16=bf16,
-        logging_steps=20,
-        output_dir="outputs",
-        optim=optim,
-        remove_unused_columns=False,
-        num_train_epochs=num_train_epochs,
-        early_stopping_patience=early_stopping_patience,
-        early_stopping_threshold=early_stopping_threshold,
-        max_seq_length=context_length,
-    )
     tokenizer = AutoTokenizer.from_pretrained(
         model_id,
         use_fast=True,
@@ -100,22 +90,68 @@ def train_lora(model_id: str, context_length: int, training_args: Dict, data_fil
     )
 
     # Load dataset
-    data_path = f"data/{data_file_name}"
+    data_path = f"data/{data}"
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Data file {data_path} does not exist.")
     
-    dataset = SFTDataset(
+    full_dataset = SFTDataset(
         file=data_path,
         tokenizer=tokenizer,
         max_seq_length=context_length,
         template=model2template[model_id],
     )
+    
+    # Split dataset into train and validation sets
+    total_size = len(full_dataset)
+    val_size = int(total_size * validation_ratio)
+    train_size = total_size - val_size
+    
+    train_dataset, val_dataset = random_split(
+        full_dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)  # For reproducibility
+    )
+    
+    print(f"Dataset split: Train={len(train_dataset)}, Validation={len(val_dataset)}")
+
+    # Calculate warmup steps based on the number of training examples
+    num_examples = len(train_dataset)  # Use train dataset size
+    batch_size = per_device_train_batch_size * gradient_accumulation_steps
+    warmup_steps = int(num_examples * num_train_epochs * warmup_steps_ratio / batch_size)
+
+    training_config = SFTConfig(
+        per_device_train_batch_size=per_device_train_batch_size,
+        per_device_eval_batch_size=per_device_train_batch_size,  # Same batch size for eval
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        warmup_steps=warmup_steps,
+        learning_rate=learning_rate,
+        bf16=bf16,
+        logging_steps=20,
+        output_dir="outputs",
+        optim=optim,
+        remove_unused_columns=False,
+        num_train_epochs=num_train_epochs,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_threshold=early_stopping_threshold,
+        max_seq_length=context_length,
+        
+        # Evaluation settings
+        evaluation_strategy="steps",  # Evaluate every eval_steps
+        eval_steps=20,  # Same as logging_steps
+        save_strategy="steps",
+        save_steps=20,
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+    )
 
     # Define trainer
     trainer = SFTTrainer(
         model=model,
-        train_dataset=dataset,
-        args=training_args,
+        train_dataset=train_dataset,  # Use splited train dataset
+        eval_dataset=val_dataset,     # Add validation dataset
+        args=training_config,
         peft_config=lora_config,
         data_collator=SFTDataCollator(tokenizer, max_seq_length=context_length),
     )
@@ -134,19 +170,34 @@ def train_lora(model_id: str, context_length: int, training_args: Dict, data_fil
 
 
 if __name__ == "__main__":
-    # Load configuration from config.json
-    config = load_config("config.json")
+    # Load environment variables from .env file
+    load_dotenv()
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="LoRA Fine-tuning Script")
+    parser.add_argument(
+        "--config", type=str, default="config.json",
+        help="Path to the configuration JSON file (default: config.json)"
+    )
+    args = parser.parse_args()
+    
+    # Load configuration from specified config file
+    config = load_config(args.config)
 
-    # Set model ID and context length from config
+    # Unpack config file
     model_id = config.get("model_id", "Qwen/Qwen1.5-0.5B")
     context_length = config.get("context_length", 4096)
-    data_file_name = config.get("data_file_name", "demo_data.jsonl")
+    data = config.get("data", "demo_data.jsonl")
+    augmented_data = config.get("augmented_data", None)
+    validation_ratio = config.get("validation_ratio", 0.2)
     training_args = config.get("training_args", {})
 
     # Start LoRA fine-tuning
     train_lora(
         model_id=model_id,
         context_length=context_length,
-        training_args=training_args,
-        data_file_name=data_file_name
+        validation_ratio=validation_ratio,
+        data=data,
+        augmented_data=augmented_data,
+        training_args=training_args
     )
