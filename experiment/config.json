@@ -1,0 +1,20 @@
+{
+  "model_id": "Qwen/Qwen1.5-0.5B",
+  "context_length": 4096,
+  "data_file_name": "demo_data.jsonl",
+  "training_args": {
+    "num_train_epochs": 3,
+    "per_device_train_batch_size": 2,
+    "gradient_accumulation_steps": 2,
+    "lora_rank": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.05,
+    "target_modules": ["q_proj", "v_proj"],
+    "early_stopping_patience": 3,
+    "early_stopping_threshold": 0.001,
+    "learning_rate": 2e-4,
+    "warmup_steps": 0.1,
+    "bf16": true,
+    "optim": "adam_torch"
+  }
+}
