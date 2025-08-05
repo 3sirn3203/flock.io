@@ -9,10 +9,11 @@ from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTTrainer, SFTConfig
 from dotenv import load_dotenv
-from torch.utils.data import random_split
+from torch.utils.data import random_split, ConcatDataset
 
 from dataset import SFTDataCollator, SFTDataset
 from utils.constants import model2template
+from plot_loss import plot_loss_from_trainer
 
 
 def load_config(config_path: str = "config.json"):
@@ -43,7 +44,8 @@ class LoraTrainingArguments:
 
 
 def train_lora(model_id: str, context_length: int, data: str, augmented_data: str,
-               validation_ratio: float, training_args: Dict):
+               validation_ratio: float, validation_strategy: str, seed: int,
+               training_args: Dict):
 
     # Define training arguments
     per_device_train_batch_size = training_args.get("per_device_train_batch_size", 1)
@@ -89,7 +91,7 @@ def train_lora(model_id: str, context_length: int, data: str, augmented_data: st
         token=os.environ["HF_TOKEN"],
     )
 
-    # Load dataset
+    # Load main dataset
     data_path = f"data/{data}"
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Data file {data_path} does not exist.")
@@ -101,7 +103,7 @@ def train_lora(model_id: str, context_length: int, data: str, augmented_data: st
         template=model2template[model_id],
     )
     
-    # Split dataset into train and validation sets
+    # Split main dataset into train and validation sets
     total_size = len(full_dataset)
     val_size = int(total_size * validation_ratio)
     train_size = total_size - val_size
@@ -109,10 +111,81 @@ def train_lora(model_id: str, context_length: int, data: str, augmented_data: st
     train_dataset, val_dataset = random_split(
         full_dataset, 
         [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)  # For reproducibility
+        generator=torch.Generator().manual_seed(seed)  # Use passed seed
     )
     
-    print(f"Dataset split: Train={len(train_dataset)}, Validation={len(val_dataset)}")
+    # Handle augmented data if provided
+    augmented_dataset = None
+    if augmented_data is not None:
+        augmented_data_path = f"data/{augmented_data}"
+        if not os.path.exists(augmented_data_path):
+            print(f"Warning: Augmented data file {augmented_data_path} does not exist. Skipping augmented data.")
+        else:
+            print(f"Loading augmented data from: {augmented_data_path}")
+            augmented_dataset = SFTDataset(
+                file=augmented_data_path,
+                tokenizer=tokenizer,
+                max_seq_length=context_length,
+                template=model2template[model_id],
+            )
+    
+    # Configure validation strategy
+    print(f"Using validation strategy: {validation_strategy}")
+    
+    if validation_strategy == "original_only":
+        # Only use original data for validation
+        final_val_dataset = val_dataset
+        if augmented_dataset is not None:
+            train_dataset = ConcatDataset([train_dataset, augmented_dataset])
+            print(f"Train: original train + augmented, Validation: original only")
+    
+    elif validation_strategy == "mixed":
+        # Use original + portion of augmented for validation
+        if augmented_dataset is not None:
+            # Split augmented data (80% to train, 20% to validation)
+            aug_total = len(augmented_dataset)
+            aug_val_size = int(aug_total * validation_ratio)
+            aug_train_size = aug_total - aug_val_size
+            
+            aug_train_dataset, aug_val_dataset = random_split(
+                augmented_dataset,
+                [aug_train_size, aug_val_size],
+                generator=torch.Generator().manual_seed(seed + 1)  # Different seed
+            )
+            
+            train_dataset = ConcatDataset([train_dataset, aug_train_dataset])
+            final_val_dataset = ConcatDataset([val_dataset, aug_val_dataset])
+            print(f"Train: original train + augmented train, Validation: original + augmented")
+        else:
+            final_val_dataset = val_dataset
+            print(f"No augmented data provided, using original validation only")
+    
+    elif validation_strategy == "augmented_only":
+        # Use only augmented data for validation (if available)
+        if augmented_dataset is not None:
+            # Split augmented data (80% to train, 20% to validation)
+            aug_total = len(augmented_dataset)
+            aug_val_size = int(aug_total * validation_ratio)
+            aug_train_size = aug_total - aug_val_size
+            
+            aug_train_dataset, aug_val_dataset = random_split(
+                augmented_dataset,
+                [aug_train_size, aug_val_size],
+                generator=torch.Generator().manual_seed(seed + 1)
+            )
+            
+            train_dataset = ConcatDataset([train_dataset, aug_train_dataset])
+            final_val_dataset = aug_val_dataset
+            print(f"Train: original train + augmented train, Validation: augmented only")
+        else:
+            final_val_dataset = val_dataset
+            print(f"No augmented data provided, falling back to original validation")
+    
+    else:
+        raise ValueError(f"Unknown validation_strategy: {validation_strategy}. "
+                        f"Choose from: 'original_only', 'mixed', 'augmented_only'")
+    
+    print(f"Final dataset split: Train={len(train_dataset)}, Validation={len(final_val_dataset)}")
 
     # Calculate warmup steps based on the number of training examples
     num_examples = len(train_dataset)  # Use train dataset size
@@ -149,8 +222,8 @@ def train_lora(model_id: str, context_length: int, data: str, augmented_data: st
     # Define trainer
     trainer = SFTTrainer(
         model=model,
-        train_dataset=train_dataset,  # Use splited train dataset
-        eval_dataset=val_dataset,     # Add validation dataset
+        train_dataset=train_dataset,  # Use final train dataset
+        eval_dataset=final_val_dataset,     # Use final validation dataset
         args=training_config,
         peft_config=lora_config,
         data_collator=SFTDataCollator(tokenizer, max_seq_length=context_length),
@@ -164,6 +237,10 @@ def train_lora(model_id: str, context_length: int, data: str, augmented_data: st
 
     # remove checkpoint folder
     os.system("rm -rf outputs/checkpoint-*")
+
+    # Plot training and validation losses
+    print("Generating loss plots...")
+    plot_loss_from_trainer(trainer, output_dir="outputs")
 
     # upload lora weights and tokenizer
     print("Training Completed.")
@@ -190,6 +267,8 @@ if __name__ == "__main__":
     data = config.get("data", "demo_data.jsonl")
     augmented_data = config.get("augmented_data", None)
     validation_ratio = config.get("validation_ratio", 0.2)
+    validation_strategy = config.get("validation_strategy", "original_only")
+    seed = config.get("seed", 42)
     training_args = config.get("training_args", {})
 
     # Start LoRA fine-tuning
@@ -197,7 +276,9 @@ if __name__ == "__main__":
         model_id=model_id,
         context_length=context_length,
         validation_ratio=validation_ratio,
+        validation_strategy=validation_strategy,
         data=data,
         augmented_data=augmented_data,
-        training_args=training_args
+        seed=seed,
+        training_args=training_args,
     )

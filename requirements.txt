@@ -7,3 +7,4 @@ bitsandbytes
 pyyaml
 python-dotenv
 matplotlib
+numpy
