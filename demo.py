@@ -141,18 +141,25 @@ def train_lora(model_id: str, context_length: int, data: str, augmented_data: st
 
 if __name__ == "__main__":
     # Define training arguments for LoRA fine-tuning
-    training_args = LoraTrainingArguments(
-        num_train_epochs=3,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=2,
-        lora_rank=8,
-        lora_alpha=16,
-        lora_dropout=0.05,
-    )
-
+    training_args = {
+        "per_device_train_batch_size": 1,
+        "gradient_accumulation_steps": 8,
+        "num_train_epochs": 1,
+        "lora_rank": 8,
+        "lora_alpha": 16,
+        "lora_dropout": 0.1,
+        "target_modules": ["q_proj", "v_proj"],
+        "early_stopping_patience": 3,
+        "early_stopping_threshold": 0.001,
+        "learning_rate": 2e-4,
+        "warmup_steps_ratio": 0.1,
+        "bf16": True,
+        "optim": "adam_torch"
+    }
+    
     # Set model ID and context length
-    model_id = "Qwen/Qwen1.5-0.5B"
-    context_length = 2048
+    model_id = "Qwen/Qwen2.5-0.5B"
+    context_length = 4096
     data = "demo_data.jsonl"
     augmented_data = None
 
@@ -162,5 +169,5 @@ if __name__ == "__main__":
         context_length=context_length, 
         data=data,
         augmented_data=augmented_data,
-        training_args=training_args.__dict__
+        training_args=training_args
     )
