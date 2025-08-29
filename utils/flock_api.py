@@ -1,10 +1,9 @@
 import json
 import os
-
 import requests
 
 FLOCK_API_KEY = os.environ["FLOCK_API_KEY"]
-FED_LEDGER_BASE_URL = "https://fed-ledger-prod.flock.io/api/v1"
+FED_LEDGER_BASE_URL = os.environ["FED_LEDGER_BASE_URL"]
 
 
 def get_task(task_id: int):

@@ -2,6 +2,7 @@ import json
 import os
 
 import requests
+from dotenv import load_dotenv
 from loguru import logger
 from huggingface_hub import HfApi
 
@@ -10,19 +11,26 @@ from utils.constants import model2base_model, model2size
 from utils.flock_api import get_task, submit_task
 from utils.gpu_utils import get_gpu_type
 
-HF_USERNAME = os.environ["HF_USERNAME"]
 
 if __name__ == "__main__":
-    task_id = os.environ["TASK_ID"]
+    
+    # .env 파일을 환경변수로 등록합니다.
+    load_dotenv()
 
-    # load training args
-    current_folder = os.path.dirname(os.path.realpath(__file__))
-    with open(f"{current_folder}/config.json", "r") as f:
+    # 필요한 환경변수를 불러옵니다.
+    TASK_ID = os.environ["TASK_ID"]
+    HF_USERNAME = os.environ["HF_USERNAME"]
+
+    # config.json 파일을 불러옵니다. (제출용 파일은 config.json으로 이름 고정.)
+    root_dir = os.path.dirname(os.path.realpath(__file__))
+    config_path = f"{root_dir}/config.json"
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file {config_path} does not exist.")
+    with open(config_path, "r") as f:
         config = json.load(f)
 
-    task = get_task(task_id)
-
-    # log the task info
+    # task를 불러온 후 log에 기록합니다.
+    task = get_task(TASK_ID)
     logger.info(json.dumps(task, indent=4))
 
     context_length = task["data"]["context_length"]
@@ -68,7 +76,7 @@ if __name__ == "__main__":
     try:
         logger.info("Start to push the lora weight to the hub...")
         api = HfApi(token=os.environ["HF_TOKEN"])
-        repo_name = f"{HF_USERNAME}/task-{task_id}-{model_id.replace('/', '-')}"
+        repo_name = f"{HF_USERNAME}/task-{TASK_ID}-{model_id.replace('/', '-')}"
         # check whether the repo exists
         try:
             api.create_repo(
@@ -92,7 +100,7 @@ if __name__ == "__main__":
         logger.info(f"Repo name: {repo_name}")
         # submit
         submit_task(
-            task_id, repo_name, model2base_model[model_id], gpu_type, commit_hash
+            TASK_ID, repo_name, model2base_model[model_id], gpu_type, commit_hash
         )
         logger.info("Task submitted successfully")
     except Exception as e:

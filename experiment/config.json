@@ -6,18 +6,19 @@
   "validation_ratio": 0.2,
   "seed": 42,
   "training_args": {
-    "num_train_epochs": 3,
-    "per_device_train_batch_size": 2,
-    "gradient_accumulation_steps": 2,
     "lora_rank": 8,
     "lora_alpha": 16,
     "lora_dropout": 0.05,
     "target_modules": ["q_proj", "v_proj"],
-    "early_stopping_patience": 3,
-    "early_stopping_threshold": 0.001,
+    "per_device_train_batch_size": 2,
+    "gradient_accumulation_steps": 2,
+    "num_train_epochs": 3,
     "learning_rate": 2e-4,
+    "optim": "adam_torch",
+    "early_stopping_patience": 3,
+    "early_stopping_threshold": 0.001, 
     "warmup_steps_ratio": 0.1,
     "bf16": true,
-    "optim": "adam_torch"
+    "evals_per_epoch": 2
   }
 }
